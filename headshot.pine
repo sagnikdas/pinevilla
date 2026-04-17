@@ -1,0 +1,42 @@
+//@version=5
+indicator("HeadShot Pro by Sagnik Das", overlay=false, max_bars_back=500)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+grp1 = "RSI Oscillator"
+rsiPeriod = input.int(9,  "RSI Period",        minval=2, group=grp1)
+wmaPeriod = input.int(21, "WMA Period on RSI", minval=2, group=grp1)
+emaPeriod = input.int(3,  "EMA Period on RSI", minval=2, group=grp1)
+
+grp2 = "Signal Filter"
+useRsiFilter = input.bool(false, "Filter by RSI side of 50", group=grp2,
+     tooltip="ON: buy signals only when RSI > 50, sell signals only when RSI < 50. Reduces signals but improves quality.")
+
+// ─── Core ─────────────────────────────────────────────────────────────────────
+rsiVal   = ta.rsi(close, rsiPeriod)
+wmaOnRsi = ta.wma(rsiVal, wmaPeriod)
+emaOnRsi = ta.ema(rsiVal, emaPeriod)
+
+// ─── Signals ──────────────────────────────────────────────────────────────────
+// Primary signal: fast EMA momentum crosses the slow WMA trend on the RSI
+// RSI filter is optional (off by default) so signals fire freely
+bullSignal = ta.crossover(emaOnRsi,  wmaOnRsi) and (not useRsiFilter or rsiVal > 50)
+bearSignal = ta.crossunder(emaOnRsi, wmaOnRsi) and (not useRsiFilter or rsiVal < 50)
+
+// ─── Plots ────────────────────────────────────────────────────────────────────
+plot(rsiVal,   "RSI",        color=color.new(color.red,   0), linewidth=2)
+plot(wmaOnRsi, "WMA on RSI", color=color.new(color.blue,  0), linewidth=2)
+plot(emaOnRsi, "EMA on RSI", color=color.new(color.green, 0), linewidth=1)
+
+hline(70, "Overbought", color=color.new(color.red,   40), linestyle=hline.style_dashed, linewidth=1)
+hline(50, "Mid",        color=color.new(color.white, 50), linestyle=hline.style_dotted, linewidth=1)
+hline(30, "Oversold",   color=color.new(color.green, 40), linestyle=hline.style_dashed, linewidth=1)
+
+// Signal markers pinned to y=5 (buy) and y=95 (sell) so they stay in this pane
+plotshape(bullSignal ? 5  : na, "Buy",  shape.labelup,   location.absolute, color.new(color.green, 0), text="B", textcolor=color.white, size=size.small)
+plotshape(bearSignal ? 95 : na, "Sell", shape.labeldown, location.absolute, color.new(color.red,   0), text="S", textcolor=color.white, size=size.small)
+
+bgcolor(bullSignal ? color.new(color.green, 85) : bearSignal ? color.new(color.red, 85) : na)
+
+// ─── Alerts ───────────────────────────────────────────────────────────────────
+alertcondition(bullSignal, "HeadShot Buy",  "HeadShot Pro: BUY — EMA crossed above WMA on RSI")
+alertcondition(bearSignal, "HeadShot Sell", "HeadShot Pro: SELL — EMA crossed below WMA on RSI")
