@@ -8,7 +8,7 @@ wmaPeriod = input.int(21, "WMA Period on RSI", minval=2, group=grp1)
 emaPeriod = input.int(3,  "EMA Period on RSI", minval=2, group=grp1)
 
 grp2 = "Signal Filter"
-useRsiFilter = input.bool(false, "Filter by RSI side of 50", group=grp2,
+useRsiFilter = input.bool(true, "Filter by RSI side of 50", group=grp2,
      tooltip="ON: buy signals only when RSI > 50, sell signals only when RSI < 50. Reduces signals but improves quality.")
 
 // ─── Core ─────────────────────────────────────────────────────────────────────
