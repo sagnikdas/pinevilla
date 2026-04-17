@@ -1,0 +1,209 @@
+//@version=5
+strategy("HeadShot Strategy by Sagnik Das", overlay=false, max_bars_back=500,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     commission_type=strategy.commission.percent, commission_value=0.1,
+     slippage=2, initial_capital=10000)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+grp1 = "RSI Oscillator"
+rsiPeriod = input.int(12, "RSI Period",        minval=2, group=grp1)
+wmaPeriod = input.int(28, "WMA Period on RSI", minval=2, group=grp1)
+emaPeriod = input.int(3,  "EMA Period on RSI", minval=2, group=grp1)
+
+grp2 = "Signal Filter"
+useRsiFilter  = input.bool(true, "Filter by RSI threshold", group=grp2,
+     tooltip="ON: buy signals only when RSI > bull threshold, sell only when RSI < bear threshold.")
+rsiBullThresh = input.int(58, "RSI Bull Threshold", minval=50, maxval=80, group=grp2,
+     tooltip="RSI must be above this for a long entry. 58 is the optimised default for 1h.")
+rsiBearThresh = input.int(45, "RSI Bear Threshold", minval=20, maxval=50, group=grp2,
+     tooltip="RSI must be below this for a short entry. 45 is the optimised default for 1h.")
+
+grp7 = "VWAP Confirmation"
+useVwap      = input.bool(true,  "Require VWAP confirmation", group=grp7,
+     tooltip="Long only when normalized VWAP > 50, short only when < 50.")
+vwapLookback = input.int(50, "VWAP Normalization Lookback", minval=10, group=grp7)
+
+grp3 = "Risk Management"
+useSL       = input.bool(true,  "Use Stop Loss",              group=grp3)
+useTP       = input.bool(true,  "Use Take Profit",            group=grp3)
+riskPerc    = input.float(1.0,  "Risk % of Equity per Trade", minval=0.1, step=0.1, group=grp3,
+     tooltip="Position is sized to risk this % of current equity. Capped at Max Loss USDT.")
+maxLossUSDT = input.float(30.0, "Max Loss Cap (USDT)",        minval=0.1, step=0.5, group=grp3,
+     tooltip="Hard ceiling on the risk amount — overrides Risk % if equity × Risk% exceeds this.")
+slPerc      = input.float(1.5,  "Stop Loss %",                minval=0.1, step=0.1, group=grp3,
+     tooltip="Distance of stop from entry price. Position size is auto-calculated from Risk % and SL%.")
+tpPerc      = input.float(6.0,  "Take Profit %",              minval=0.1, step=0.1, group=grp3,
+     tooltip="6% TP with 1.5% SL gives a 4:1 R:R — optimised default for 1h.")
+
+grp4 = "Trade Direction"
+tradeDir = input.string("Both", "Allow Trades", options=["Both", "Long Only", "Short Only"], group=grp4)
+
+grp5 = "Trend Filter"
+useTrendFilter = input.bool(true,  "Only trade with trend (EMA)", group=grp5,
+     tooltip="Long only when price > Trend EMA, short only when price < Trend EMA.")
+trendEmaPeriod = input.int(200, "Trend EMA Period", minval=10, step=10, group=grp5)
+
+grp6 = "Circuit Breaker"
+useCircuitBreaker = input.bool(true, "Pause after consecutive losses", group=grp6)
+maxConsecLosses   = input.int(3,  "Max Consecutive Losses",      minval=1, group=grp6,
+     tooltip="Stops taking new trades after this many losses in a row.")
+cooldownBars      = input.int(10, "Cooldown Bars After Trigger",  minval=1, group=grp6,
+     tooltip="Number of bars to wait before resuming after the circuit breaker fires.")
+
+// ─── Core ─────────────────────────────────────────────────────────────────────
+rsiVal   = ta.rsi(close, rsiPeriod)
+wmaOnRsi = ta.wma(rsiVal, wmaPeriod)
+emaOnRsi = ta.ema(rsiVal, emaPeriod)
+trendEma = ta.ema(close, trendEmaPeriod)
+
+// Normalized VWAP: rescale to 0-100 using rolling high/low of close
+vwapVal    = ta.vwap(hlc3)
+priceHigh  = ta.highest(close, vwapLookback)
+priceLow   = ta.lowest(close,  vwapLookback)
+priceRange = priceHigh - priceLow
+vwapNorm   = priceRange > 0 ? (vwapVal - priceLow) / priceRange * 100 : 50
+
+// ─── Signals ──────────────────────────────────────────────────────────────────
+rsiOkBull  = not useRsiFilter or rsiVal > rsiBullThresh
+rsiOkBear  = not useRsiFilter or rsiVal < rsiBearThresh
+vwapOkBull = not useVwap or vwapNorm > 50
+vwapOkBear = not useVwap or vwapNorm < 50
+
+bullSignal = ta.crossover(emaOnRsi,  wmaOnRsi) and rsiOkBull and vwapOkBull
+bearSignal = ta.crossunder(emaOnRsi, wmaOnRsi) and rsiOkBear and vwapOkBear
+
+// ─── Trend Filter ─────────────────────────────────────────────────────────────
+trendBullOk = not useTrendFilter or close > trendEma
+trendBearOk = not useTrendFilter or close < trendEma
+
+// ─── Circuit Breaker ──────────────────────────────────────────────────────────
+var int consecLosses  = 0
+var int cooldownUntil = 0
+var int lastClosedCount = 0
+
+if strategy.closedtrades > lastClosedCount
+    p = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if p < 0
+        consecLosses += 1
+        if useCircuitBreaker and consecLosses >= maxConsecLosses
+            cooldownUntil := bar_index + cooldownBars
+            consecLosses  := 0
+    else
+        consecLosses := 0
+    lastClosedCount := strategy.closedtrades
+
+inCooldown = useCircuitBreaker and bar_index < cooldownUntil
+
+// ─── Entries ──────────────────────────────────────────────────────────────────
+longOk  = tradeDir == "Both" or tradeDir == "Long Only"
+shortOk = tradeDir == "Both" or tradeDir == "Short Only"
+
+// Risk amount: % of current equity, capped at the hard USDT ceiling
+riskAmt = math.min(strategy.equity * riskPerc / 100, maxLossUSDT)
+riskQty = riskAmt / (close * slPerc / 100)
+
+if bullSignal and longOk and trendBullOk and not inCooldown
+    strategy.entry("Long",  strategy.long,  qty=riskQty)
+
+if bearSignal and shortOk and trendBearOk and not inCooldown
+    strategy.entry("Short", strategy.short, qty=riskQty)
+
+// ─── Exits: opposite signal ───────────────────────────────────────────────────
+if bearSignal and longOk
+    strategy.close("Long", comment="Exit Long")
+
+if bullSignal and shortOk
+    strategy.close("Short", comment="Exit Short")
+
+// ─── Exits: SL / TP ───────────────────────────────────────────────────────────
+longSL  = useSL ? strategy.position_avg_price * (1 - slPerc / 100) : na
+longTP  = useTP ? strategy.position_avg_price * (1 + tpPerc / 100) : na
+shortSL = useSL ? strategy.position_avg_price * (1 + slPerc / 100) : na
+shortTP = useTP ? strategy.position_avg_price * (1 - tpPerc / 100) : na
+
+if strategy.position_size > 0
+    strategy.exit("Long SL/TP", "Long",  stop=longSL,  limit=longTP)
+
+if strategy.position_size < 0
+    strategy.exit("Short SL/TP", "Short", stop=shortSL, limit=shortTP)
+
+// ─── Plots ────────────────────────────────────────────────────────────────────
+plot(rsiVal,   "RSI",        color=color.new(color.red,   0), linewidth=2)
+plot(wmaOnRsi, "WMA on RSI", color=color.new(color.blue,  0), linewidth=2)
+plot(emaOnRsi, "EMA on RSI", color=color.new(color.green, 0), linewidth=1)
+
+hline(70, "Overbought", color=color.new(color.red,   40), linestyle=hline.style_dashed, linewidth=1)
+hline(50, "Mid",        color=color.new(color.white, 50), linestyle=hline.style_dotted, linewidth=1)
+hline(30, "Oversold",   color=color.new(color.green, 40), linestyle=hline.style_dashed, linewidth=1)
+
+plotshape(bullSignal ? 5  : na, "Buy",  shape.labelup,   location.absolute, color.new(color.green, 0), text="B", textcolor=color.white, size=size.small)
+plotshape(bearSignal ? 95 : na, "Sell", shape.labeldown, location.absolute, color.new(color.red,   0), text="S", textcolor=color.white, size=size.small)
+
+bgcolor(bullSignal ? color.new(color.green, 85) : bearSignal ? color.new(color.red, 85) : na)
+
+// ─── PnL Table ────────────────────────────────────────────────────────────────
+var float longPnl  = 0.0
+var float shortPnl = 0.0
+var int   longWins = 0
+var int   longLoss = 0
+var int   shortWins = 0
+var int   shortLoss = 0
+
+// Accumulate on each newly closed trade
+if strategy.closedtrades > 0
+    idx = strategy.closedtrades - 1
+    if strategy.closedtrades.entry_bar_index(idx) != strategy.closedtrades.entry_bar_index(idx > 0 ? idx - 1 : idx) or idx == 0
+        p = strategy.closedtrades.profit(idx)
+        if strategy.closedtrades.size(idx) > 0
+            longPnl  += p
+            longWins  := p >= 0 ? longWins  + 1 : longWins
+            longLoss  := p <  0 ? longLoss  + 1 : longLoss
+        else
+            shortPnl += p
+            shortWins := p >= 0 ? shortWins + 1 : shortWins
+            shortLoss := p <  0 ? shortLoss + 1 : shortLoss
+
+// Rebuild from all closed trades on the last bar for accuracy
+if barstate.islastconfirmedhistory or barstate.islast
+    longPnl   := 0.0
+    shortPnl  := 0.0
+    longWins  := 0
+    longLoss  := 0
+    shortWins := 0
+    shortLoss := 0
+    for i = 0 to strategy.closedtrades - 1
+        p = strategy.closedtrades.profit(i)
+        if strategy.closedtrades.size(i) > 0
+            longPnl  += p
+            longWins  := p >= 0 ? longWins  + 1 : longWins
+            longLoss  := p <  0 ? longLoss  + 1 : longLoss
+        else
+            shortPnl += p
+            shortWins := p >= 0 ? shortWins + 1 : shortWins
+            shortLoss := p <  0 ? shortLoss + 1 : shortLoss
+
+    var table t = table.new(position.bottom_right, 3, 4,
+         border_color=color.new(color.gray, 50), border_width=1,
+         frame_color=color.new(color.gray, 30), frame_width=1)
+
+    // Header
+    table.cell(t, 0, 0, "",        bgcolor=color.new(color.gray, 70), text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 0, "Buy",     bgcolor=color.new(color.gray, 70), text_color=color.new(color.green, 0), text_size=size.small)
+    table.cell(t, 2, 0, "Sell",    bgcolor=color.new(color.gray, 70), text_color=color.new(color.red,   0), text_size=size.small)
+
+    // Trades row
+    table.cell(t, 0, 1, "Trades",  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(longWins  + longLoss),  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 1, str.tostring(shortWins + shortLoss), bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+
+    // Win/Loss row
+    table.cell(t, 0, 2, "W / L",   bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(longWins)  + " / " + str.tostring(longLoss),  bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(t, 2, 2, str.tostring(shortWins) + " / " + str.tostring(shortLoss), bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+
+    // PnL row
+    longColor  = longPnl  >= 0 ? color.new(color.green, 0) : color.new(color.red, 0)
+    shortColor = shortPnl >= 0 ? color.new(color.green, 0) : color.new(color.red, 0)
+    table.cell(t, 0, 3, "PnL (USDT)", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(math.round(longPnl,  2)), bgcolor=color.new(color.gray, 80), text_color=longColor,  text_size=size.small)
+    table.cell(t, 2, 3, str.tostring(math.round(shortPnl, 2)), bgcolor=color.new(color.gray, 80), text_color=shortColor, text_size=size.small)

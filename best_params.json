@@ -1,0 +1,52 @@
+{
+  "15m": {
+    "rsi_period": 12,
+    "wma_period": 21,
+    "ema_period": 5,
+    "rsi_bull": 58,
+    "rsi_bear": 39,
+    "sl_perc": 1.5,
+    "tp_perc": 9.0,
+    "vwap_lb": 200
+  },
+  "30m": {
+    "rsi_period": 14,
+    "wma_period": 28,
+    "ema_period": 5,
+    "rsi_bull": 61,
+    "rsi_bear": 42,
+    "sl_perc": 1.5,
+    "tp_perc": 4.5,
+    "vwap_lb": 50
+  },
+  "1h": {
+    "rsi_period": 12,
+    "wma_period": 28,
+    "ema_period": 3,
+    "rsi_bull": 58,
+    "rsi_bear": 45,
+    "sl_perc": 1.5,
+    "tp_perc": 6.0,
+    "vwap_lb": 50
+  },
+  "4h": {
+    "rsi_period": 9,
+    "wma_period": 21,
+    "ema_period": 3,
+    "rsi_bull": 58,
+    "rsi_bear": 42,
+    "sl_perc": 2.0,
+    "tp_perc": 4.5,
+    "vwap_lb": 200
+  },
+  "1d": {
+    "rsi_period": 9,
+    "wma_period": 14,
+    "ema_period": 5,
+    "rsi_bull": 52,
+    "rsi_bear": 48,
+    "sl_perc": 1.5,
+    "tp_perc": 4.5,
+    "vwap_lb": 50
+  }
+}
