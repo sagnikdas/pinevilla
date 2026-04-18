@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 indicator("HeadShot Pro by Sagnik Das", overlay=false, max_bars_back=500)
 
 // ─── Auto Timeframe Toggle ────────────────────────────────────────────────────
@@ -19,29 +19,51 @@ rsiBearMan = input.int(45, "RSI Bear Threshold", minval=20, maxval=50, group=grp
      tooltip="RSI must be below this for a short signal.")
 
 grp7 = "VWAP Confirmation"
-useVwap   = input.bool(true, "Require VWAP confirmation", group=grp7,
-     tooltip="Long only when normalised VWAP > 50, short only when < 50.")
-vwapLbMan = input.int(50, "VWAP Lookback (manual)", minval=10, group=grp7)
+useVwap = input.bool(true, "Require VWAP confirmation", group=grp7,
+     tooltip="Long only when close > session VWAP, short only when close < session VWAP.")
 
 grp5 = "Trend Filter"
-useTrendFilter = input.bool(true, "Only trade with trend (200 EMA)", group=grp5,
-     tooltip="Long only when price > 200 EMA, short only when price < 200 EMA.")
+useTrendFilter = input.bool(true, "Only trade with trend (EMA)", group=grp5,
+     tooltip="Long only when price > trend EMA, short only when price < trend EMA.")
+trendEmaLength = input.int(200, "Trend EMA length", minval=10, maxval=500, group=grp5,
+     tooltip="200 = swing bias. Use 34–55 for faster momentum scalping on 1–5m charts.")
+
+grpScalp = "Momentum scalping"
+requireMomentumConfirm = input.bool(false, "Require RSI & signal-line momentum", group=grpScalp,
+     tooltip="Longs need rising RSI and rising EMA-on-RSI; shorts need both falling. Good for fast entries; off matches legacy behavior.")
+cooldownBars = input.int(0, "Min bars between signals", minval=0, maxval=30, group=grpScalp,
+     tooltip="0 = off. Try 2–5 on 1–5m to reduce chop. Any signal (buy or sell) starts the cooldown.")
+
+grpExec = "Execution & quality"
+confirmOnClose = input.bool(true, "Confirm signals on bar close", group=grpExec,
+     tooltip="When on, signals align with closed bars (less repaint / fewer intrabar flips). Recommended for alerts.")
+useExhaustFilter = input.bool(false, "RSI exhaustion filter", group=grpExec,
+     tooltip="Avoid longs when RSI is very overbought and shorts when very oversold (fade exhaustion chop). Off = legacy behavior.")
+rsiCapLong = input.int(78, "Long max RSI", minval=65, maxval=95, group=grpExec,
+     tooltip="Block long signals if RSI is above this (exhaustion zone).")
+rsiFloorShort = input.int(24, "Short min RSI", minval=5, maxval=35, group=grpExec,
+     tooltip="Block short signals if RSI is below this (exhaustion zone).")
+
+grpHtf = "Higher timeframe"
+htfTf = input.timeframe("", "HTF trend filter", group=grpHtf,
+     tooltip="Leave empty to disable. Uses same Trend EMA length on the higher timeframe: longs only when HTF close > HTF EMA; shorts when below. Non-repainting (prior HTF values).")
 
 // ─── Per-TF Optimal Params ────────────────────────────────────────────────────
 // Source: grid search over 19,008 param combos per timeframe.
 // Score = Sharpe × Profit Factor × (1 + MaxDD/100), min 10 trades.
+// VWAP check: close vs session VWAP (not normalised).
 //
-//  TF   RSI  WMA  EMA  Bull  Bear  VWAP_LB
-//  1-5m  12   21    5    58    39     200   (mirrors 15m)
-//  15m   12   21    5    58    39     200
-//  30m   14   28    5    61    42      50
-//  1h    12   28    3    58    45      50
-//  2h    12   28    3    58    45      50   (mirrors 1h)
-//  4h     9   21    3    58    42     200
-//  6h     9   21    3    58    42     200   (mirrors 4h)
-//  12h    9   14    5    52    48      50   (mirrors 1d)
-//  1d     9   14    5    52    48      50
-//  1w     9   14    5    52    48      50   (mirrors 1d)
+//  TF    RSI  WMA  EMA  Bull  Bear
+//  1-5m   12   21    5    58    42  (mirrors 15m)
+//  15m    12   21    5    58    42
+//  30m    14   28    5    61    42
+//  1h     12   28    3    58    45
+//  2h     12   28    3    58    45  (mirrors 1h)
+//  4h      9   21    3    58    42
+//  6h      9   21    3    58    42  (mirrors 4h)
+//  12h     9   14    5    52    48  (mirrors 1d)
+//  1d      9   14    5    52    48
+//  1w      9   14    5    52    48  (mirrors 1d)
 
 _tf = timeframe.period
 
@@ -78,60 +100,90 @@ rsiBull = autoParams ?
       _tf == "720" or _tf == "D" or _tf == "W"    ? 52 : 58) : rsiBullMan
 
 rsiBear = autoParams ?
-     (_tf == "1"  or _tf == "3"  or _tf == "5"  ? 39 :
-      _tf == "15"                                 ? 39 :
+     (_tf == "1"  or _tf == "3"  or _tf == "5"  ? 42 :
+      _tf == "15"                                 ? 42 :
       _tf == "30"                                 ? 42 :
       _tf == "60"  or _tf == "120"                ? 45 :
       _tf == "240" or _tf == "360"                ? 42 :
       _tf == "720" or _tf == "D" or _tf == "W"    ? 48 : 45) : rsiBearMan
 
-vwapLb = autoParams ?
-     (_tf == "1"  or _tf == "3"  or _tf == "5"  ? 200 :
-      _tf == "15"                                 ? 200 :
-      _tf == "30"                                 ? 50  :
-      _tf == "60"  or _tf == "120"                ? 50  :
-      _tf == "240" or _tf == "360"                ? 200 :
-      _tf == "720" or _tf == "D" or _tf == "W"    ? 50  : 50) : vwapLbMan
-
 // ─── Core Calculations ────────────────────────────────────────────────────────
 rsiVal   = ta.rsi(close, rsiPeriod)
 wmaOnRsi = ta.wma(rsiVal, wmaPeriod)
 emaOnRsi = ta.ema(rsiVal, emaPeriod)
-trendEma = ta.ema(close, 200)
+trendEma = ta.ema(close, trendEmaLength)
 
-// Normalised VWAP: rescale to 0–100 using rolling high/low of close
-vwapVal    = ta.vwap(hlc3)
-priceHigh  = ta.highest(close, vwapLb)
-priceLow   = ta.lowest(close,  vwapLb)
-priceRange = priceHigh - priceLow
-vwapNorm   = priceRange > 0 ? (vwapVal - priceLow) / priceRange * 100 : 50
+// Session VWAP — signal filter only: close vs vwapVal (price above/below session average).
+vwapVal = ta.vwap(hlc3)
 
-// ─── Signal Logic ─────────────────────────────────────────────────────────────
-vwapOkBull  = not useVwap or vwapNorm > 50
-vwapOkBear  = not useVwap or vwapNorm < 50
+// HTF trend (optional): prior HTF bar close vs EMA on that timeframe — same length as chart trend EMA.
+bool htfEnabled = str.length(htfTf) > 0
+float htfClose = htfEnabled ? request.security(syminfo.tickerid, htfTf, close[1], barmerge.gaps_off, barmerge.lookahead_off) : na
+float htfTrendEma = htfEnabled ? request.security(syminfo.tickerid, htfTf, ta.ema(close, trendEmaLength)[1], barmerge.gaps_off, barmerge.lookahead_off) : na
+htfOkBull = not htfEnabled or (not na(htfClose) and not na(htfTrendEma) and htfClose > htfTrendEma)
+htfOkBear = not htfEnabled or (not na(htfClose) and not na(htfTrendEma) and htfClose < htfTrendEma)
+
+vwapOkBull = not useVwap or close > vwapVal
+vwapOkBear = not useVwap or close < vwapVal
 trendOkBull = not useTrendFilter or close > trendEma
 trendOkBear = not useTrendFilter or close < trendEma
 
-bullSignal = ta.crossover(emaOnRsi,  wmaOnRsi) and rsiVal > rsiBull and vwapOkBull and trendOkBull
-bearSignal = ta.crossunder(emaOnRsi, wmaOnRsi) and rsiVal < rsiBear and vwapOkBear and trendOkBear
+momOkBull = not requireMomentumConfirm or (rsiVal > rsiVal[1] and emaOnRsi > emaOnRsi[1])
+momOkBear = not requireMomentumConfirm or (rsiVal < rsiVal[1] and emaOnRsi < emaOnRsi[1])
+
+exhaustOkBull = not useExhaustFilter or rsiVal <= rsiCapLong
+exhaustOkBear = not useExhaustFilter or rsiVal >= rsiFloorShort
+
+int WARMUP = math.max(math.max(rsiPeriod, wmaPeriod), math.max(emaPeriod, trendEmaLength)) + 2
+bool isWarmedUp = bar_index >= WARMUP
+
+rawBull = ta.crossover(emaOnRsi, wmaOnRsi) and rsiVal > rsiBull and vwapOkBull and trendOkBull and momOkBull and htfOkBull and exhaustOkBull
+rawBear = ta.crossunder(emaOnRsi, wmaOnRsi) and rsiVal < rsiBear and vwapOkBear and trendOkBear and momOkBear and htfOkBear and exhaustOkBear
+
+bool barConfirmed = not confirmOnClose or barstate.isconfirmed
+
+var int lastSignalBar = na
+barsSinceSignal = na(lastSignalBar) ? 1000000 : bar_index - lastSignalBar
+cooldownOk = cooldownBars == 0 or barsSinceSignal >= cooldownBars
+
+bullSignal = rawBull and cooldownOk and barConfirmed and isWarmedUp
+bearSignal = rawBear and cooldownOk and not bullSignal and barConfirmed and isWarmedUp
+
+if bullSignal or bearSignal
+    lastSignalBar := bar_index
+
+// Confluence count (for dashboard): layers aligned on the crossover bar (base + optional filters enabled)
+bool crossBull = ta.crossover(emaOnRsi, wmaOnRsi) and rsiVal > rsiBull
+bool crossBear = ta.crossunder(emaOnRsi, wmaOnRsi) and rsiVal < rsiBear
+int confBull = crossBull ? (1 + (useVwap and vwapOkBull ? 1 : 0) + (useTrendFilter and trendOkBull ? 1 : 0) + (requireMomentumConfirm and momOkBull ? 1 : 0) + (htfEnabled and htfOkBull ? 1 : 0) + (useExhaustFilter and exhaustOkBull ? 1 : 0)) : 0
+int confBear = crossBear ? (1 + (useVwap and vwapOkBear ? 1 : 0) + (useTrendFilter and trendOkBear ? 1 : 0) + (requireMomentumConfirm and momOkBear ? 1 : 0) + (htfEnabled and htfOkBear ? 1 : 0) + (useExhaustFilter and exhaustOkBear ? 1 : 0)) : 0
+int confMax = 1 + (useVwap ? 1 : 0) + (useTrendFilter ? 1 : 0) + (requireMomentumConfirm ? 1 : 0) + (htfEnabled ? 1 : 0) + (useExhaustFilter ? 1 : 0)
+
+var string lastConfSnapshot = "—"
+if bullSignal
+    lastConfSnapshot := str.tostring(confBull) + "/" + str.tostring(confMax) + " · Long"
+else if bearSignal
+    lastConfSnapshot := str.tostring(confBear) + "/" + str.tostring(confMax) + " · Short"
 
 // ─── Plots ────────────────────────────────────────────────────────────────────
-plot(rsiVal,   "RSI",        color=color.new(color.red,   0), linewidth=2)
-plot(wmaOnRsi, "WMA on RSI", color=color.new(color.blue,  0), linewidth=2)
-plot(emaOnRsi, "EMA on RSI", color=color.new(color.green, 0), linewidth=1)
+plot(rsiVal,   "RSI",        color=color.new(color.red,    0), linewidth=2)
+plot(wmaOnRsi, "WMA on RSI", color=color.new(color.blue,   0), linewidth=2)
+plot(emaOnRsi, "EMA on RSI", color=color.new(color.green,  0), linewidth=1)
 
 hline(70, "Overbought", color=color.new(color.red,   40), linestyle=hline.style_dashed, linewidth=1)
 hline(50, "Mid",        color=color.new(color.white, 50), linestyle=hline.style_dotted, linewidth=1)
 hline(30, "Oversold",   color=color.new(color.green, 40), linestyle=hline.style_dashed, linewidth=1)
 
-plotshape(bullSignal ? 5  : na, "Buy",  shape.labelup,   location.absolute, color.new(color.green, 0), text="B", textcolor=color.white, size=size.small)
-plotshape(bearSignal ? 95 : na, "Sell", shape.labeldown, location.absolute, color.new(color.red,   0), text="S", textcolor=color.white, size=size.small)
+// Anchor markers at the actual RSI level when the signal fires. Fixed y (e.g. 5 / 95) made B/S
+// always sit at the pane edges so they looked unrelated to the crossover and RSI zone.
+plotshape(bullSignal ? rsiVal : na, "Buy",  shape.labelup,   location.absolute, color.new(color.green, 0), text="B", textcolor=color.white, size=size.small)
+plotshape(bearSignal ? rsiVal : na, "Sell", shape.labeldown, location.absolute, color.new(color.red,   0), text="S", textcolor=color.white, size=size.small)
 
 bgcolor(bullSignal ? color.new(color.green, 85) : bearSignal ? color.new(color.red, 85) : na)
 
 // ─── Active Params Table (top-right) ─────────────────────────────────────────
 if barstate.islast
-    var table tbl = table.new(position.top_right, 2, 8,
+    var table tbl = table.new(position.top_right, 2, 14,
          border_color=color.new(color.gray, 50), border_width=1,
          frame_color=color.new(color.gray, 30), frame_width=1)
 
@@ -161,12 +213,34 @@ if barstate.islast
     table.cell(tbl, 0, 5, "Bear ▼",  bgcolor=c_hdr, text_color=c_txt, text_size=sz)
     table.cell(tbl, 1, 5, str.tostring(rsiBear), bgcolor=c_val, text_color=color.new(color.red, 0), text_size=sz)
 
-    table.cell(tbl, 0, 6, "VWAP LB", bgcolor=c_hdr, text_color=c_txt, text_size=sz)
-    table.cell(tbl, 1, 6, str.tostring(vwapLb), bgcolor=c_val, text_color=c_txt, text_size=sz)
+    table.cell(tbl, 0, 6, "VWAP", bgcolor=c_hdr, text_color=c_txt, text_size=sz)
+    table.cell(tbl, 1, 6, useVwap ? "vs price" : "Off", bgcolor=c_val, text_color=c_txt, text_size=sz)
 
     table.cell(tbl, 0, 7, "Trend",   bgcolor=c_hdr, text_color=c_txt, text_size=sz)
-    table.cell(tbl, 1, 7, useTrendFilter ? "EMA 200" : "Off", bgcolor=c_val,
+    table.cell(tbl, 1, 7, useTrendFilter ? ("EMA " + str.tostring(trendEmaLength)) : "Off", bgcolor=c_val,
          text_color=useTrendFilter ? color.new(color.yellow, 0) : color.new(color.gray, 30), text_size=sz)
+
+    table.cell(tbl, 0, 8, "Mom", bgcolor=c_hdr, text_color=c_txt, text_size=sz)
+    table.cell(tbl, 1, 8, requireMomentumConfirm ? "RSI+EMA Δ" : "Off", bgcolor=c_val,
+         text_color=requireMomentumConfirm ? color.new(color.aqua, 0) : color.new(color.gray, 30), text_size=sz)
+
+    table.cell(tbl, 0, 9, "Cooldown", bgcolor=c_hdr, text_color=c_txt, text_size=sz)
+    table.cell(tbl, 1, 9, cooldownBars > 0 ? str.tostring(cooldownBars) + " bars" : "Off", bgcolor=c_val, text_color=c_txt, text_size=sz)
+
+    table.cell(tbl, 0, 10, "Bar close", bgcolor=c_hdr, text_color=c_txt, text_size=sz)
+    table.cell(tbl, 1, 10, confirmOnClose ? "Confirm" : "Intrabar", bgcolor=c_val,
+         text_color=confirmOnClose ? color.new(color.lime, 0) : color.new(color.orange, 0), text_size=sz)
+
+    table.cell(tbl, 0, 11, "HTF", bgcolor=c_hdr, text_color=c_txt, text_size=sz)
+    table.cell(tbl, 1, 11, htfEnabled ? htfTf : "Off", bgcolor=c_val,
+         text_color=htfEnabled ? color.new(color.yellow, 0) : color.new(color.gray, 30), text_size=sz)
+
+    table.cell(tbl, 0, 12, "RSI exhaust", bgcolor=c_hdr, text_color=c_txt, text_size=sz)
+    table.cell(tbl, 1, 12, useExhaustFilter ? ("≤" + str.tostring(rsiCapLong) + " / ≥" + str.tostring(rsiFloorShort)) : "Off", bgcolor=c_val,
+         text_color=useExhaustFilter ? color.new(color.aqua, 0) : color.new(color.gray, 30), text_size=sz)
+
+    table.cell(tbl, 0, 13, "Last conf", bgcolor=c_hdr, text_color=c_txt, text_size=sz)
+    table.cell(tbl, 1, 13, lastConfSnapshot, bgcolor=c_val, text_color=c_txt, text_size=sz)
 
 // ─── Alerts ───────────────────────────────────────────────────────────────────
 alertcondition(bullSignal, "HeadShot Buy",  "HeadShot Pro: BUY — EMA crossed above WMA on RSI")

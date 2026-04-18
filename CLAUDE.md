@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a single-file TradingView indicator written in **Pine Script v5**. The script (`headshot.pine`) is deployed directly to TradingView — there is no build system, package manager, or local execution environment.
+This is a single-file TradingView indicator written in **Pine Script v6**. The script (`headshot.pine`) is deployed directly to TradingView — there is no build system, package manager, or local execution environment.
 
 ## Development Workflow
 
@@ -14,20 +14,46 @@ This is a single-file TradingView indicator written in **Pine Script v5**. The s
 
 ## Architecture
 
-The indicator runs in a separate oscillator pane (`overlay=false`) and combines three signals:
+The indicator runs in a separate oscillator pane (`overlay=false`). All signal logic flows through a layered gate pipeline evaluated on every bar.
 
-| Signal | Calculation | Default Period |
-|--------|-------------|----------------|
-| RSI | `ta.rsi(close, rsiPeriod)` | 9 |
-| WMA on RSI | `ta.wma(rsiVal, wmaPeriod)` | 21 |
-| EMA on RSI | `ta.ema(rsiVal, emaPeriod)` | 3 |
-| VWAP (normalized) | `ta.vwap(hlc3)` rescaled to 0–100 using 100-bar high/low of `close` | — |
+### Core Calculations
 
-VWAP normalization formula: `(vwapVal - priceLow) / (priceHigh - priceLow) * 100`, clamped to 50 when the range is flat.
+| Variable | Formula | Notes |
+|----------|---------|-------|
+| `rsiVal` | `ta.rsi(close, rsiPeriod)` | — |
+| `wmaOnRsi` | `ta.wma(rsiVal, wmaPeriod)` | Slow signal line |
+| `emaOnRsi` | `ta.ema(rsiVal, emaPeriod)` | Fast signal line |
+| `trendEma` | `ta.ema(close, trendEmaLength)` | Chart-timeframe trend filter |
+| `vwapVal` | `ta.vwap(hlc3)` | Session VWAP; compared directly against `close` (not normalized) |
+
+The raw signal trigger is `ta.crossover(emaOnRsi, wmaOnRsi)` (bull) / `ta.crossunder` (bear) combined with an RSI threshold gate (`rsiVal > rsiBull` / `rsiVal < rsiBear`).
+
+### Signal Gate Pipeline
+
+Each gate is independently togglable via inputs. A signal (`bullSignal` / `bearSignal`) fires only when **all enabled gates pass**:
+
+1. **RSI threshold** — always on; `rsiBull`/`rsiBear` thresholds vary by timeframe in auto mode.
+2. **VWAP confirmation** (`useVwap`) — long only when `close > vwapVal`; short only when `close < vwapVal`.
+3. **Trend EMA filter** (`useTrendFilter`) — long only when `close > trendEma`; short only when below.
+4. **Momentum confirmation** (`requireMomentumConfirm`) — requires rising RSI and rising `emaOnRsi` for longs (falling for shorts).
+5. **HTF trend filter** (`htfTf`) — uses `request.security` with `lookahead_off` and `close[1]`/`ema[1]` (prior bar) to avoid repainting; disabled when `htfTf` is empty.
+6. **RSI exhaustion filter** (`useExhaustFilter`) — blocks longs above `rsiCapLong`, shorts below `rsiFloorShort`.
+7. **Cooldown** (`cooldownBars`) — enforces a minimum bar gap between any signal using a `var int lastSignalBar` counter.
+8. **Warmup guard** (`isWarmedUp`) — suppresses signals until `bar_index >= max(rsiPeriod, wmaPeriod, emaPeriod, trendEmaLength) + 2`.
+9. **Bar-close confirmation** (`confirmOnClose`) — gates on `barstate.isconfirmed` to reduce intrabar repaints.
+
+### Auto-Timeframe Parameter Selection
+
+When `autoParams=true`, `rsiPeriod`, `wmaPeriod`, `emaPeriod`, `rsiBull`, and `rsiBear` are selected from a hardcoded lookup table keyed on `timeframe.period`. The lookup was derived from a grid search over 19,008 parameter combinations. Manual inputs are ignored in this mode.
+
+### Dashboard Table
+
+Rendered once at `barstate.islast` using `table.new`. Displays all active parameters and a `lastConfSnapshot` string (e.g. `"3/4 · Long"`) showing how many confluence layers aligned on the last signal.
 
 ## Pine Script Conventions
 
-- Version declaration must be the first line: `//@version=5`
+- Version declaration must be the first line: `//@version=6`
 - All user-facing settings use `input.*` functions grouped with `group=` for UI organization.
 - `max_bars_back=500` is set on the `indicator()` call to support lookback calculations.
 - Use `ta.*` namespace for all built-in technical analysis functions.
+- HTF `request.security` calls must use `barmerge.lookahead_off` and index with `[1]` on both the source series and the derived indicator to remain non-repainting.
